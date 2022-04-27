@@ -1,2 +1,2 @@
 # StorSeismic: An approach to pre-train a neural network to store seismic data features
-Reserved repository for StorSeismic
+Reserved repository for StorSeismic.
