@@ -468,7 +468,7 @@ class BertSelfAttention(nn.Module):
         # Take the dot product between "query" and "key" to get the raw attention scores.
         if self.attention_type == "default":
             attention_scores = torch.matmul(query_layer, key_layer.transpose(-1, -2))
-        elif self.attention_type == "dense_synth":
+        elif self.attention_type == "dense_synth1" or self.attention_type == "dense_synth2":
             scores_shape =  (hidden_states.size()[0], self.num_attention_heads, self.max_length, self.max_length)
             attention_scores = torch.empty(scores_shape, device=hidden_states.device)
             for i, head_module in enumerate(self.head):
