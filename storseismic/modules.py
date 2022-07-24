@@ -330,13 +330,27 @@ class FirstBreakHead4(nn.Module):
         
         return output
 
-class DenseSynthesizerHead(nn.Module):
+class DenseSynthesizerHead1(nn.Module):
     def __init__(self, config):
         super().__init__()
         self.dense = nn.Sequential(
             nn.Linear(config.hidden_size, config.hidden_size),
             nn.ReLU(),
             nn.Linear(config.hidden_size, config.max_length)
+        )
+
+    def forward(self, x):
+        output = self.dense(x)
+
+        return output
+    
+class DenseSynthesizerHead2(nn.Module):
+    def __init__(self, config):
+        super().__init__()
+        self.dense = nn.Sequential(
+            nn.Linear(config.hidden_size, config.max_length),
+            nn.ReLU(),
+            nn.Linear(config.max_length, config.max_length)
         )
 
     def forward(self, x):
@@ -382,8 +396,10 @@ class BertSelfAttention(nn.Module):
                  params.requires_grad = False
         self.value = nn.Linear(config.hidden_size, self.all_head_size)
 
-        if self.attention_type == "dense_synth":
-            self.head = nn.ModuleList([DenseSynthesizerHead(config) for _ in range(config.num_attention_heads)])
+        if self.attention_type == "dense_synth1":
+            self.head = nn.ModuleList([DenseSynthesizerHead1(config) for _ in range(config.num_attention_heads)])
+        elif self.attention_type == "dense_synth2":
+            self.head = nn.ModuleList([DenseSynthesizerHead2(config) for _ in range(config.num_attention_heads)])
         elif self.attention_type == "rand_synth":
             self.head = nn.ModuleList([RandomSynthesizerHead(config) for _ in range(config.num_attention_heads)])
 
