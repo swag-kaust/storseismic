@@ -44,8 +44,12 @@ class BertEmbeddings(nn.Module):
     def __init__(self, config):
         super().__init__()
         self.word_embeddings = nn.Linear(config.vocab_size, config.hidden_size)
+
         self.position_embeddings = PositionalEncoding(d_model=config.hidden_size,
-                                                      max_len=config.max_position_embeddings)
+                                                        max_len=config.max_position_embeddings)
+        if config.add_alibi:
+            self.position_embeddings.pe = torch.zeros(config.max_position_embeddings, 1, config.hidden_size)
+        
 #         self.token_type_embeddings = nn.Embedding(config.type_vocab_size, config.hidden_size)
         self.LayerNorm = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
         self.dropout = nn.Dropout(config.hidden_dropout_prob)
@@ -363,6 +367,11 @@ class RandomSynthesizerHead(nn.Module):
         super().__init__()
         if config.fixed:
             self.attention = nn.Parameter(torch.empty(config.max_length, config.max_length), requires_grad=False)
+            # val1 = torch.ones(config.max_length - 1) * 0.5
+            # val1[0] = 1
+            # val2 = torch.ones(config.max_length - 1) * 0.5
+            # val2[-1] = 1
+            # self.attention = torch.diag(val1, 1) + torch.diag(val2, -1)
         else:
             self.attention = nn.Parameter(torch.empty(config.max_length, config.max_length), requires_grad=True)
         nn.init.xavier_uniform_(self.attention)
@@ -386,6 +395,9 @@ class BertSelfAttention(nn.Module):
         self.all_head_size = self.num_attention_heads * self.attention_head_size
         self.max_length = config.max_length
         self.attention_type = config.attention_type
+        self.add_alibi = config.add_alibi
+        self.alibi_type = config.alibi_type
+        self.fixed_slopes = config.fixed_slopes
 
         self.query = nn.Linear(config.hidden_size, self.all_head_size)
         self.key = nn.Linear(config.hidden_size, self.all_head_size)
@@ -412,6 +424,58 @@ class BertSelfAttention(nn.Module):
             self.distance_embedding = nn.Embedding(2 * config.max_position_embeddings - 1, self.attention_head_size)
 
         self.is_decoder = config.is_decoder
+        
+        def get_slopes(n):
+            def get_slopes_power_of_2(n):
+                start = (2**(-2**-(math.log2(n)-3)))
+                ratio = start
+                return [start*ratio**i for i in range(n)]
+
+            if math.log2(n).is_integer():
+                return get_slopes_power_of_2(n)
+            else:                       
+                closest_power_of_2 = 2**math.floor(math.log2(n)) 
+                return get_slopes_power_of_2(closest_power_of_2) + get_slopes(2*closest_power_of_2)[0::2][:n-closest_power_of_2]
+
+        def fill_with_neg_inf(t):
+            """FP16-compatible function that fills a tensor with -inf."""
+            return t.float().fill_(float("-inf")).type_as(t)
+        
+        if self.add_alibi:
+            context_position = torch.arange(self.max_length)[:, None]
+            memory_position = torch.arange(self.max_length)[None, :]
+            relative_position = memory_position - context_position 
+
+            if self.alibi_type == "sym":
+                relative_position = torch.abs(relative_position).unsqueeze(0).expand(self.num_attention_heads, -1,-1)
+                self.slopes = torch.Tensor(get_slopes(self.num_attention_heads))*-1
+                self.alibi = self.slopes.unsqueeze(1).unsqueeze(1) * relative_position
+                self.alibi = self.alibi.view(1, self.num_attention_heads, self.max_length, self.max_length)
+            elif self.alibi_type == "nosym_mask":
+                relative_position = torch.abs(relative_position).unsqueeze(0).expand(self.num_attention_heads//2, -1,-1)
+                self._future_mask_right = torch.triu(fill_with_neg_inf(torch.zeros([self.max_length, self.max_length])), 1).unsqueeze(0).repeat(self.num_attention_heads//2, 1, 1)
+                self._future_mask_left = torch.tril(fill_with_neg_inf(torch.zeros([self.max_length, self.max_length])), -1).unsqueeze(0).repeat(self.num_attention_heads//2, 1, 1)
+                self.nonsym_mask = torch.cat((self._future_mask_right, self._future_mask_left), dim = 0).unsqueeze(0)
+                self.slopes = torch.Tensor(get_slopes(self.num_attention_heads//2))*-1
+                self.alibi = self.slopes.unsqueeze(1).unsqueeze(1) * relative_position
+                self.alibi = self.alibi.view(1, self.num_attention_heads//2, self.max_length, self.max_length)
+                self.alibi = self.alibi.repeat(1, 2, 1, 1)
+            elif self.alibi_type == "nosym":
+                relative_position = torch.abs(relative_position).unsqueeze(0).expand(self.num_attention_heads, -1,-1)
+                if self.fixed_slopes:
+                    self.slopes_left = torch.nn.parameter.Parameter(torch.Tensor(self.num_attention_heads), requires_grad=False)
+                    self.slopes_right = torch.nn.parameter.Parameter(torch.Tensor(self.num_attention_heads), requires_grad=False)
+                else:
+                    self.slopes_left = torch.nn.parameter.Parameter(torch.Tensor(self.num_attention_heads), requires_grad=True)
+                    self.slopes_right = torch.nn.parameter.Parameter(torch.Tensor(self.num_attention_heads), requires_grad=True)
+                nn.init.normal_(self.slopes_left, -2, 1)
+                nn.init.normal_(self.slopes_right, -2, 1)
+                alibi_left = self.slopes_left.unsqueeze(1).unsqueeze(1) * relative_position
+                alibi_right = self.slopes_right.unsqueeze(1).unsqueeze(1) * relative_position
+                self.alibi = torch.triu(alibi_right) + torch.tril(alibi_left)
+
+        else:
+            self.alibi = None
 
     def transpose_for_scores(self, x: torch.Tensor) -> torch.Tensor:
         new_x_shape = x.size()[:-1] + (self.num_attention_heads, self.attention_head_size)
@@ -495,11 +559,18 @@ class BertSelfAttention(nn.Module):
                 relative_position_scores_query = torch.einsum("bhld,lrd->bhlr", query_layer, positional_embedding)
                 relative_position_scores_key = torch.einsum("bhrd,lrd->bhlr", key_layer, positional_embedding)
                 attention_scores = attention_scores + relative_position_scores_query + relative_position_scores_key
+        
+        if self.add_alibi:
+            attention_scores += self.alibi.repeat(attention_scores.size()[0], 1, 1, 1).to(attention_scores.device)
 
         attention_scores = attention_scores / math.sqrt(self.attention_head_size)
+
         if attention_mask is not None:
             # Apply the attention mask is (precomputed for all layers in BertModel forward() function)
             attention_scores = attention_scores + attention_mask
+
+        if self.alibi_type == "nosym_mask":
+            attention_scores += self.nonsym_mask.repeat(attention_scores.size()[0], 1, 1, 1).to(attention_scores.device)
 
         # Normalize the attention scores to probabilities.
         attention_probs = nn.functional.softmax(attention_scores, dim=-1)
