@@ -1,9 +1,11 @@
 # StorSeismic: An approach to pre-train a neural network to store seismic data features
 This repository contains codes and resources to reproduce experiments of StorSeismic in Harsuko and Alkhalifah, 2020.
 
-<!-- ## Introduction
-
-## Installation -->
+## Requirements
+We use [RAdam](https://github.com/LiyuanLucasLiu/RAdam) as the default optimizer. To install this, use:
+```
+pip install git+https://github.com/LiyuanLucasLiu/RAdam
+```
 
 ## Instruction
 
