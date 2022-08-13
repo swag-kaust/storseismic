@@ -337,9 +337,13 @@ class FirstBreakHead4(nn.Module):
 class DenseSynthesizerHead1(nn.Module):
     def __init__(self, config):
         super().__init__()
+        if config.dense_synth_act == "relu":
+            self.act_fn = nn.ReLU()
+        elif config.dense_synth_act == "gelu":
+            self.act_fn = nn.GELU()
         self.dense = nn.Sequential(
             nn.Linear(config.hidden_size, config.hidden_size),
-            nn.ReLU(),
+            self.act_fn,
             nn.Linear(config.hidden_size, config.max_length)
         )
 
@@ -351,9 +355,13 @@ class DenseSynthesizerHead1(nn.Module):
 class DenseSynthesizerHead2(nn.Module):
     def __init__(self, config):
         super().__init__()
+        if config.dense_synth_act == "relu":
+            self.act_fn = nn.ReLU()
+        elif config.dense_synth_act == "gelu":
+            self.act_fn = nn.GELU()
         self.dense = nn.Sequential(
             nn.Linear(config.hidden_size, config.max_length),
-            nn.ReLU(),
+            self.act_fn,
             nn.Linear(config.max_length, config.max_length)
         )
 
@@ -378,6 +386,25 @@ class RandomSynthesizerHead(nn.Module):
 
     def forward(self):
         output = self.attention
+
+        return output
+
+class FactorizedRandomSynthesizerHead(nn.Module):
+    def __init__(self, config):
+        super().__init__()
+        self.fixed = config.fixed
+
+        self.query_fc = nn.Parameter(torch.empty(config.max_length, config.k), requires_grad=True)
+        nn.init.xavier_uniform_(self.query_fc)
+        if not self.fixed:
+            self.key_fc = nn.Parameter(torch.empty(config.max_length, config.k), requires_grad=True)
+            nn.init.xavier_uniform_(self.key_fc)
+
+    def forward(self, x):
+        if not self.fixed:
+            output = torch.matmul(self.query_fc, self.key_fc.transpose(-1, -2))
+        else:
+            output = torch.matmul(self.query_fc, self.query_fc.transpose(-1, -2))
 
         return output
 
@@ -475,6 +502,8 @@ class BertSelfAttention(nn.Module):
             self.head = nn.ModuleList([DenseSynthesizerHead2(config) for _ in range(config.num_attention_heads)])
         elif self.attention_type == "rand_synth":
             self.head = nn.ModuleList([RandomSynthesizerHead(config) for _ in range(config.num_attention_heads)])
+        elif self.attention_type == "fcrand_synth":
+            self.head = nn.ModuleList([FactorizedRandomSynthesizerHead(config) for _ in range(config.num_attention_heads)])
 
         self.dropout = nn.Dropout(config.attention_probs_dropout_prob)
         self.position_embedding_type = position_embedding_type or getattr(
@@ -546,7 +575,8 @@ class BertSelfAttention(nn.Module):
         # Take the dot product between "query" and "key" to get the raw attention scores.
         if self.attention_type == "default":
             attention_scores = torch.matmul(query_layer, key_layer.transpose(-1, -2))
-        elif self.attention_type == "dense_synth1" or self.attention_type == "dense_synth2":
+        # elif self.attention_type == "dense_synth1" or self.attention_type == "dense_synth2":
+        elif self.attention_type in ["dense_synth1","dense_synth2", "fcrand_synth"]:
             scores_shape =  (hidden_states.size()[0], self.num_attention_heads, self.max_length, self.max_length)
             attention_scores = torch.empty(scores_shape, device=hidden_states.device)
             for i, head_module in enumerate(self.head):
