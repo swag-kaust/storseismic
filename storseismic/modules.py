@@ -394,19 +394,41 @@ class FactorizedRandomSynthesizerHead(nn.Module):
         super().__init__()
         self.fixed = config.fixed
 
-        self.query_fc = nn.Parameter(torch.empty(config.max_length, config.k), requires_grad=True)
+        self.query_fc = nn.Parameter(torch.empty(config.num_attention_heads, config.max_length, config.k), requires_grad=True)
         nn.init.xavier_uniform_(self.query_fc)
         if not self.fixed:
-            self.key_fc = nn.Parameter(torch.empty(config.max_length, config.k), requires_grad=True)
+            self.key_fc = nn.Parameter(torch.empty(config.num_attention_heads, config.max_length, config.k), requires_grad=True)
             nn.init.xavier_uniform_(self.key_fc)
 
-    def forward(self, x):
+    def forward(self):
         if not self.fixed:
-            output = torch.matmul(self.query_fc, self.key_fc.transpose(-1, -2))
+            output = torch.einsum('hnk,hmk->hnm', self.query_fc, self.key_fc)
         else:
-            output = torch.matmul(self.query_fc, self.query_fc.transpose(-1, -2))
+            output = torch.einsum('hnk,hmk->hnm', self.query_fc, self.query_fc)
 
         return output
+
+class URPE(nn.Module):
+    def __init__(self, config):
+        super().__init__()
+        
+        self.num_attention_heads = config.num_attention_heads
+        self.max_length = config.max_length
+        
+        self.urpe_weight_ = nn.Parameter(torch.ones(self.num_attention_heads, 2 * self.max_length), requires_grad=True)
+    
+    def forward(self, attention_probs):
+        def toeplitz(c, r):
+            vals = torch.cat((r, c[1:].flip(0)))
+            shape = r.shape[0], r.shape[-1], c.shape[-1]
+            i, j, k = torch.ones(*shape).nonzero().T
+            return vals[i, k-j].reshape(*shape)
+        
+        self.urpe_weight = toeplitz(self.urpe_weight_[:, :self.max_length], self.urpe_weight_[:, self.max_length:])
+        
+        attention_probs = torch.mul(attention_probs, self.urpe_weight.to(attention_probs.device))
+        
+        return attention_probs
 
 class LinearBiases(nn.Module):
     def __init__(self, config):
@@ -486,10 +508,11 @@ class BertSelfAttention(nn.Module):
         self.add_alibi = config.add_alibi
         self.alibi_type = config.alibi_type
         self.fixed_slopes = config.fixed_slopes
+        self.add_urpe = config.add_urpe
 
         self.query = nn.Linear(config.hidden_size, self.all_head_size)
         self.key = nn.Linear(config.hidden_size, self.all_head_size)
-        if self.attention_type != "default":
+        if self.attention_type not in ["default", "default_fcrand"]:
             for params in self.query.parameters():
                  params.requires_grad = False
             for params in self.key.parameters():
@@ -502,8 +525,13 @@ class BertSelfAttention(nn.Module):
             self.head = nn.ModuleList([DenseSynthesizerHead2(config) for _ in range(config.num_attention_heads)])
         elif self.attention_type == "rand_synth":
             self.head = nn.ModuleList([RandomSynthesizerHead(config) for _ in range(config.num_attention_heads)])
-        elif self.attention_type == "fcrand_synth":
-            self.head = nn.ModuleList([FactorizedRandomSynthesizerHead(config) for _ in range(config.num_attention_heads)])
+        elif self.attention_type in ["fcrand_synth", "default_fcrand"]:
+            self.head = FactorizedRandomSynthesizerHead(config)
+
+        # Add learnable weight if mixture synthesizer is used
+        if self.attention_type == "default_fcrand":
+            self.mixture_weight = nn.Parameter(torch.empty(1, self.num_attention_heads, 1, 1, 2), requires_grad=True)
+            nn.init.xavier_uniform_(self.mixture_weight)
 
         self.dropout = nn.Dropout(config.attention_probs_dropout_prob)
         self.position_embedding_type = position_embedding_type or getattr(
@@ -519,6 +547,11 @@ class BertSelfAttention(nn.Module):
             self.alibi = LinearBiases(config)
         else:
             self.alibi = None
+            
+        if self.add_urpe:
+            self.urpe = URPE(config)
+        else:
+            self.urpe = None
 
     def transpose_for_scores(self, x: torch.Tensor) -> torch.Tensor:
         new_x_shape = x.size()[:-1] + (self.num_attention_heads, self.attention_head_size)
@@ -576,17 +609,27 @@ class BertSelfAttention(nn.Module):
         if self.attention_type == "default":
             attention_scores = torch.matmul(query_layer, key_layer.transpose(-1, -2))
         # elif self.attention_type == "dense_synth1" or self.attention_type == "dense_synth2":
-        elif self.attention_type in ["dense_synth1","dense_synth2", "fcrand_synth"]:
+        elif self.attention_type in ["dense_synth1", "dense_synth2"]:
             scores_shape =  (hidden_states.size()[0], self.num_attention_heads, self.max_length, self.max_length)
             attention_scores = torch.empty(scores_shape, device=hidden_states.device)
             for i, head_module in enumerate(self.head):
                 attention_scores[:, i] = head_module(hidden_states)
-        elif self.attention_type == "rand_synth":
+        elif self.attention_type in ["rand_synth", "fcrand_synth"]:
+            attention_scores = self.head().unsqueeze(0).repeat(hidden_states.size()[0], 1, 1, 1).to(hidden_states.device)
+        elif self.attention_type == "default_fcrand":
+            # calculate default attention scores
+            attention_scores1 = torch.matmul(query_layer, key_layer.transpose(-1, -2))
+
+            # build factorized random synthesizer attention scores
             scores_shape =  (self.num_attention_heads, self.max_length, self.max_length)
-            attention_scores = torch.empty(scores_shape, device=hidden_states.device)
+            attention_scores2 = torch.empty(scores_shape, device=hidden_states.device)
             for i, head_module in enumerate(self.head):
-                attention_scores[i] = head_module()
-            attention_scores = attention_scores.unsqueeze(0).repeat(hidden_states.size()[0], 1, 1, 1)
+                attention_scores2[i] = head_module(hidden_states)
+            attention_scores2 = attention_scores2.unsqueeze(0).repeat(hidden_states.size()[0], 1, 1, 1)
+
+            # combine both attention scores
+            mixture_weight = torch.nn.Softmax(dim=-1)(self.mixture_weight)
+            attention_scores = mixture_weight[..., 0] * attention_scores1 + mixture_weight[..., 1] * attention_scores2
 
         if self.position_embedding_type == "relative_key" or self.position_embedding_type == "relative_key_query":
             seq_length = hidden_states.size()[1]
@@ -618,6 +661,9 @@ class BertSelfAttention(nn.Module):
 
         # Normalize the attention scores to probabilities.
         attention_probs = nn.functional.softmax(attention_scores, dim=-1)
+        
+        if self.add_urpe:
+            attention_probs = self.urpe(attention_probs)
 
         # This is actually dropping out entire tokens to attend to, which might
         # seem a bit unusual, but is taken from the original Transformer paper.
