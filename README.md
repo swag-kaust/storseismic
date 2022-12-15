@@ -18,16 +18,18 @@ pip install git+https://github.com/LiyuanLucasLiu/RAdam
 | 5 | [nb2_2_finetuning_velpred.ipynb](https://github.com/swag-kaust/storseismic/blob/main/nb2_2_finetuning_velpred.ipynb) | Example of fine-tuning task: velocity estimation |
 
 ## References
-Harsuko, R., & Alkhalifah, T. (2022). StorSeismic: A new paradigm in deep learning for seismic processing. ArXiv, abs/2205.00222.
+Harsuko, R., & Alkhalifah, T. A. (2022). StorSeismic: A new paradigm in deep learning for seismic processing. IEEE Transactions on Geoscience and Remote Sensing, 60, 1-15.
 
 ## Citation
 Citations are very welcomed. This work can be cited using:
 ```
-@article{Harsuko2022StorSeismicAN,
+@article{harsuko2022storseismic,
   title={StorSeismic: A new paradigm in deep learning for seismic processing},
-  author={Randy Harsuko and Tariq Alkhalifah},
-  journal={ArXiv},
+  author={Harsuko, Randy and Alkhalifah, Tariq A},
+  journal={IEEE Transactions on Geoscience and Remote Sensing},
+  volume={60},
+  pages={1--15},
   year={2022},
-  volume={abs/2205.00222}
+  publisher={IEEE}
 }
 ```
