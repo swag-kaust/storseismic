@@ -374,14 +374,14 @@ class RandomSynthesizerHead(nn.Module):
     def __init__(self, config):
         super().__init__()
         if config.fixed:
-            self.attention = nn.Parameter(torch.empty(config.max_length, config.max_length), requires_grad=False)
+            self.attention = nn.Parameter(torch.empty(config.num_attention_heads, config.max_length, config.max_length), requires_grad=False)
             # val1 = torch.ones(config.max_length - 1) * 0.5
             # val1[0] = 1
             # val2 = torch.ones(config.max_length - 1) * 0.5
             # val2[-1] = 1
             # self.attention = torch.diag(val1, 1) + torch.diag(val2, -1)
         else:
-            self.attention = nn.Parameter(torch.empty(config.max_length, config.max_length), requires_grad=True)
+            self.attention = nn.Parameter(torch.empty(config.num_attention_heads, config.max_length, config.max_length), requires_grad=True)
         nn.init.xavier_uniform_(self.attention)
 
     def forward(self):
@@ -524,7 +524,7 @@ class BertSelfAttention(nn.Module):
         elif self.attention_type == "dense_synth2":
             self.head = nn.ModuleList([DenseSynthesizerHead2(config) for _ in range(config.num_attention_heads)])
         elif self.attention_type == "rand_synth":
-            self.head = nn.ModuleList([RandomSynthesizerHead(config) for _ in range(config.num_attention_heads)])
+            self.head = RandomSynthesizerHead(config)
         elif self.attention_type in ["fcrand_synth", "default_fcrand"]:
             self.head = FactorizedRandomSynthesizerHead(config)
 
